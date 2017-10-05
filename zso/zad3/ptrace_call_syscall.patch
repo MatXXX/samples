@@ -1,0 +1,229 @@
+diff -uprN linux_orig/arch/x86/entry/common.c test_linux/arch/x86/entry/common.c
+--- linux_orig/arch/x86/entry/common.c	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/arch/x86/entry/common.c	2017-06-14 18:49:42.081724803 +0200
+@@ -131,6 +131,7 @@ static long syscall_trace_enter(struct p
+ 	(_TIF_SIGPENDING | _TIF_NOTIFY_RESUME | _TIF_UPROBE |	\
+ 	 _TIF_NEED_RESCHED | _TIF_USER_RETURN_NOTIFY)
+ 
++void syscall_return_slowpath(struct pt_regs *regs);
+ static void exit_to_usermode_loop(struct pt_regs *regs, u32 cached_flags)
+ {
+ 	/*
+@@ -168,8 +169,29 @@ static void exit_to_usermode_loop(struct
+ 
+ 		cached_flags = READ_ONCE(current_thread_info()->flags);
+ 
+-		if (!(cached_flags & EXIT_TO_USERMODE_LOOP_FLAGS))
+-			break;
++		if (!(cached_flags & EXIT_TO_USERMODE_LOOP_FLAGS)) {
++			if (test_and_clear_tsk_thread_flag(current, TIF_RUN_SYSCALL)) {
++				local_irq_enable();
++				current->ptrace_run_syscall_calling = 1;
++				current->ptrace_run_syscall_args.ret = 
++					sys_call_table[current->ptrace_run_syscall_args.nr] (
++						current->ptrace_run_syscall_args.args[0],
++						current->ptrace_run_syscall_args.args[1],
++						current->ptrace_run_syscall_args.args[2],
++						current->ptrace_run_syscall_args.args[3],
++						current->ptrace_run_syscall_args.args[4],
++						current->ptrace_run_syscall_args.args[5]
++					);
++				local_irq_disable();
++				
++				current->ptrace_run_syscall_returned = 1;
++				current->ptrace_run_syscall_calling = 0;
++				complete(&current->ptrace_run_syscall_wait);
++				ptrace_notify(SIGTRAP);
++			}
++			else
++				break;
++		}
+ 	}
+ }
+ 
+diff -uprN linux_orig/arch/x86/include/asm/thread_info.h test_linux/arch/x86/include/asm/thread_info.h
+--- linux_orig/arch/x86/include/asm/thread_info.h	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/arch/x86/include/asm/thread_info.h	2017-06-14 17:30:04.390865018 +0200
+@@ -99,6 +99,7 @@ struct thread_info {
+ #define TIF_SYSCALL_TRACEPOINT	28	/* syscall tracepoint instrumentation */
+ #define TIF_ADDR32		29	/* 32-bit address space on 64 bits */
+ #define TIF_X32			30	/* 32-bit native x86-64 binary */
++#define TIF_RUN_SYSCALL 42  /* running syscall requested */
+ 
+ #define _TIF_SYSCALL_TRACE	(1 << TIF_SYSCALL_TRACE)
+ #define _TIF_NOTIFY_RESUME	(1 << TIF_NOTIFY_RESUME)
+@@ -121,6 +122,7 @@ struct thread_info {
+ #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
+ #define _TIF_ADDR32		(1 << TIF_ADDR32)
+ #define _TIF_X32		(1 << TIF_X32)
++#define _TIF_RUN_SYSCALL (1 << TIF_RUN_SYSCALL)
+ 
+ /*
+  * work to do in syscall_trace_enter().  Also includes TIF_NOHZ for
+diff -uprN linux_orig/include/linux/ptrace_run_syscall.h test_linux/include/linux/ptrace_run_syscall.h
+--- linux_orig/include/linux/ptrace_run_syscall.h	1970-01-01 01:00:00.000000000 +0100
++++ test_linux/include/linux/ptrace_run_syscall.h	2017-06-14 18:50:19.665724730 +0200
+@@ -0,0 +1,11 @@
++#ifndef __PTRACE_RUN_SYSCALL_H__
++#define __PTRACE_RUN_SYSCALL_H__
++
++struct ptrace_run_syscall_args {
++	int nr;
++	uint32_t arch;
++	uint64_t args[6];
++	uint64_t ret;
++};
++
++#endif //__PTRACE_RUN_SYSCALL_H__
+diff -uprN linux_orig/include/linux/sched.h test_linux/include/linux/sched.h
+--- linux_orig/include/linux/sched.h	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/include/linux/sched.h	2017-06-14 18:50:33.773724703 +0200
+@@ -62,6 +62,8 @@ struct sched_param {
+ 
+ #include <asm/processor.h>
+ 
++#include <linux/ptrace_run_syscall.h>
++
+ #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
+ 
+ /*
+@@ -1956,6 +1958,10 @@ struct task_struct {
+ 	/* A live task holds one reference. */
+ 	atomic_t stack_refcount;
+ #endif
++	struct ptrace_run_syscall_args ptrace_run_syscall_args;
++	int ptrace_run_syscall_returned;
++	struct completion ptrace_run_syscall_wait;
++	int ptrace_run_syscall_calling;
+ /* CPU-specific state of this task */
+ 	struct thread_struct thread;
+ /*
+diff -uprN linux_orig/include/uapi/linux/ptrace.h test_linux/include/uapi/linux/ptrace.h
+--- linux_orig/include/uapi/linux/ptrace.h	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/include/uapi/linux/ptrace.h	2017-06-14 17:30:04.390865018 +0200
+@@ -22,7 +22,7 @@
+ #define PTRACE_DETACH		  17
+ 
+ #define PTRACE_SYSCALL		  24
+-
++#define PTRACE_RUN_SYSCALL    42
+ /* 0x4200-0x4300 are reserved for architecture-independent additions.  */
+ #define PTRACE_SETOPTIONS	0x4200
+ #define PTRACE_GETEVENTMSG	0x4201
+diff -uprN linux_orig/kernel/fork.c test_linux/kernel/fork.c
+--- linux_orig/kernel/fork.c	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/kernel/fork.c	2017-06-14 18:50:49.053724673 +0200
+@@ -1825,6 +1825,8 @@ static __latent_entropy struct task_stru
+ 	trace_task_newtask(p, clone_flags);
+ 	uprobe_copy_process(p, clone_flags);
+ 
++	init_completion(&p->ptrace_run_syscall_wait);
++	p->ptrace_run_syscall_calling = 0;
+ 	return p;
+ 
+ bad_fork_cancel_cgroup:
+@@ -1915,6 +1917,15 @@ long _do_fork(unsigned long clone_flags,
+ 	int trace = 0;
+ 	long nr;
+ 
++    /* 
++     * This is here to prevent deadlock when
++     * tracer would wait for vfork to complete 
++     * and tracee would wait for tracer to let it run. 
++     */
++    
++    if (current->ptrace_run_syscall_calling && (clone_flags & CLONE_VFORK))
++        clone_flags |= CLONE_UNTRACED;
++
+ 	/*
+ 	 * Determine whether and which event to report to ptracer.  When
+ 	 * called from kernel_thread or CLONE_UNTRACED is explicitly
+diff -uprN linux_orig/kernel/ptrace.c test_linux/kernel/ptrace.c
+--- linux_orig/kernel/ptrace.c	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/kernel/ptrace.c	2017-06-14 18:49:53.349724782 +0200
+@@ -26,7 +26,6 @@
+ #include <linux/hw_breakpoint.h>
+ #include <linux/cn_proc.h>
+ #include <linux/compat.h>
+-
+ /*
+  * Access another process' address space via ptrace.
+  * Source/target buffer must be kernel space,
+@@ -878,6 +877,36 @@ int ptrace_request(struct task_struct *c
+ 	unsigned long flags;
+ 
+ 	switch (request) {
++	case PTRACE_RUN_SYSCALL: {
++		int res;
++		struct ptrace_run_syscall_args args;
++		
++		if (copy_from_user(&args, datavp, sizeof(struct ptrace_run_syscall_args)))
++			return -EFAULT;
++		
++		if (args.arch != AUDIT_ARCH_X86_64)
++			return -EINVAL;
++		
++		if ((args.nr & __SYSCALL_MASK) >= NR_syscalls)
++			return -EINVAL;
++		
++		set_tsk_thread_flag(child, TIF_RUN_SYSCALL);
++		child->ptrace_run_syscall_args = args;
++
++		child->ptrace_run_syscall_returned = 0;
++		reinit_completion(&child->ptrace_run_syscall_wait);
++		
++		if ((res = ptrace_resume(child, request, 0)))
++			return res;
++
++		if (wait_for_completion_killable(&child->ptrace_run_syscall_wait))
++			return -EINTR;
++
++		if (copy_to_user(datavp, &child->ptrace_run_syscall_args, sizeof(struct ptrace_run_syscall_args)))
++			return -EFAULT;
++		res = !child->ptrace_run_syscall_returned;
++		return res;
++	}
+ 	case PTRACE_PEEKTEXT:
+ 	case PTRACE_PEEKDATA:
+ 		return generic_ptrace_peekdata(child, addr, data);
+diff -uprN linux_orig/kernel/signal.c test_linux/kernel/signal.c
+--- linux_orig/kernel/signal.c	2017-02-26 11:11:18.000000000 +0100
++++ test_linux/kernel/signal.c	2017-06-14 18:50:56.813724658 +0200
+@@ -44,7 +44,6 @@
+ #include <asm/siginfo.h>
+ #include <asm/cacheflush.h>
+ #include "audit.h"	/* audit_signal_info() */
+-
+ /*
+  * SLAB caches for signal bits.
+  */
+@@ -1653,6 +1652,11 @@ bool do_notify_parent(struct task_struct
+ 	}
+ 	if (valid_signal(sig) && sig)
+ 		__group_send_sig_info(sig, &info, tsk->parent);
++	/* If we are dying due to PTRACE_RUN_SYSCALL wake up waiting tracer */
++	if (unlikely(current->ptrace_run_syscall_calling)) {
++		complete(&current->ptrace_run_syscall_wait);
++		current->ptrace_run_syscall_calling = 0;
++	}
+ 	__wake_up_parent(tsk, tsk->parent);
+ 	spin_unlock_irqrestore(&psig->siglock, flags);
+ 
+@@ -1780,6 +1784,9 @@ static void ptrace_stop(int exit_code, i
+ {
+ 	bool gstop_done = false;
+ 
++	if (current->ptrace_run_syscall_calling) {
++		return;
++	}
+ 	if (arch_ptrace_stop_needed(exit_code, info)) {
+ 		/*
+ 		 * The arch code has something special to do before a
+@@ -1876,7 +1883,6 @@ static void ptrace_stop(int exit_code, i
+ 			current->exit_code = 0;
+ 		read_unlock(&tasklist_lock);
+ 	}
+-
+ 	/*
+ 	 * We are back.  Now reacquire the siglock before touching
+ 	 * last_siginfo, so that we are sure to have synchronized with

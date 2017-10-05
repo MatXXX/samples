@@ -1,0 +1,3 @@
+obj-m := monter.o 
+
+monter-y+= monter_main.o monter_fops.o

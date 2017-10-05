@@ -1,0 +1,19 @@
+W pliku monter_main.c znajdują się funkcje inicjujące i obsługujące moduł, sterownik i urządzenia,
+handler przerwań montera i logika umieszczania danych w bloku kolejki poleceń.
+
+W pliku monter_fops.c znajduje się implementacja funkcji struct file_operations.
+
+Rozwiązanie korzysta z bloku DMA do przekazywania poleceń do urządzenia.
+Dla każdego urządzenia zaalokowany jest bufor DMA na polecenia rozmiaru jednej strony.
+Konteksty urządzenia połączone są w listę, każdy kontekst zawiera kolejkę
+poleceń do wykonania, które mogą być jednego z dwóch rodzajów:
+- COMMANDS: polecenia zlecone do wykonania przez write.
+- FSYNC: completion na którym czeka proces, dodawany w momencie fsynca.
+Interrupt handler po otrzymaniu przerwania oznaczającego skończone obliczenia
+sciąga zakończone polecenie z kolejki kontekstu (jeżeli wykonało się całe)
+i, jeżeli na początku kolejki jest polecenie fsync, budzi oczekujący proces. Aby przekopiować
+więcej danych przechodzi Round Robinem (zaczynając od tego, który ostatnio był obsługiwany) 
+po kontekstach kopiując dane z pierwszego napotkanego kontekstu, który zlecił pracę.
+Jeżeli nie ma dalszej pracy do wykonania, to urządzenie przechodzi w stan spoczynku,
+a budzone jest przez kolejny write. Fsync wykonany przez kontekst, który nie ma 
+na kolejce żadnych zadań, nie spowoduje zatrzymania procesu.

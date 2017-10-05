@@ -1,0 +1,7 @@
+libinterceptor {
+global:
+  intercept_function;
+  unintercept_function;
+
+local: *;
+};
