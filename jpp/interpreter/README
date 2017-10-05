@@ -1,0 +1,6 @@
+Language description can be found in `description` file.
+Things to be done in second iteration:
+- shadowing variables in blocks
+- imporvements of static type checking, right now it cannot detect whether all if-else paths return a value (if only one of the paths returns, this might crash the interpreter durring execution)
+
+Files AbsGram.hs ErrM.hs LexGram.hs ParGram.hs were generated using BNFC

@@ -1,0 +1,42 @@
+This is statically typed language roughly based on C, Rust and JS.
+Declarations:
+let <name> [: <type>] = <expr> -- if type is not provided it'll be inferred from RHS.
+let <name> : <type> -- uninitialized varaible is assigned @none value.
+
+Functions are also variables, e.g.:
+let func : func int (int) = function int (x: int) {
+    return x+1;
+};
+
+Structs:
+Inspired by Rust structs.
+Constructed using initializer list (named or ordered), e.g.:
+struct S {
+    a : int;
+    b : int;
+};
+
+let x = S { b: 1, a: 2 };
+let y = S { 2, 1 };
+@assert(x == y);
+
+Types: int, bool, string, user defined structs
+Loops and conditionals: while and if/elseif/else/endif
+Functions: First class citizens, defined as usual variables, 
+ can be passed as params and used as return values, parameters can be passed
+ as copy or by reference (`ref` keyword), can be nested.
+Closures: like in JS.
+
+Builtins:
+@none - uninitialized value
+@print(...)
+@readLine() -> string
+@isNone(value) -> bool
+@stringToInt(string) -> int
+@toString(T) -> string -- this function will be implemented for ints and bools for sure.
+                       -- It'd be nice to implement it for user defined structs,
+                       -- but I don't want to make any promises (@fromString for them would also be nice).
+@assert(bool)
+@assert(bool, string) -- assert with message
+
+Exceptions are not supported therefore runtime errors will kill running program with proper message.
